@@ -175,6 +175,7 @@ class BytedanceASRLLMExtension(AsyncASRBaseExtension):
         self.enable_utterance_grouping: bool = True
 
         self._update_configs_lock: asyncio.Lock = asyncio.Lock()
+        self._connection_io_lock: asyncio.Lock = asyncio.Lock()
 
     @override
     def vendor(self) -> str:
@@ -414,19 +415,6 @@ class BytedanceASRLLMExtension(AsyncASRBaseExtension):
         self, frame: AudioFrame, session_id: str | None
     ) -> bool:
         """Send audio frame to ASR service."""
-        if not self.is_connected():
-            self.ten_env.log_warn(
-                "Not connected to ASR service, attempting to reconnect..."
-            )
-            try:
-                await self.start_connection()
-                if not self.is_connected():
-                    self.ten_env.log_error("Failed to reconnect to ASR service")
-                    return False
-            except Exception as e:
-                self.ten_env.log_error(f"Failed to reconnect: {e}")
-                return False
-
         buf = frame.lock_buf()
         try:
             # Update session_id if changed
@@ -448,8 +436,20 @@ class BytedanceASRLLMExtension(AsyncASRBaseExtension):
                 int(len(buf) / (self.input_audio_sample_rate() / 1000 * 2))
             )
 
-            # Send audio to ASR service
-            await self.client.send_audio(audio_data)
+            async with self._connection_io_lock:
+                if not self.is_connected():
+                    self.ten_env.log_warn(
+                        "Not connected to ASR service, attempting to reconnect..."
+                    )
+                    await self.start_connection()
+                    if not self.is_connected():
+                        self.ten_env.log_error(
+                            "Failed to reconnect to ASR service"
+                        )
+                        return False
+
+                assert self.client is not None
+                await self.client.send_audio(audio_data)
             return True
 
         except Exception as e:
@@ -1199,8 +1199,9 @@ class BytedanceASRLLMExtension(AsyncASRBaseExtension):
             category=LOG_CATEGORY_KEY_POINT,
         )
 
-        await self.stop_connection()
-        await self.start_connection()
+        async with self._connection_io_lock:
+            await self.stop_connection()
+            await self.start_connection()
 
         return True, ""
 
